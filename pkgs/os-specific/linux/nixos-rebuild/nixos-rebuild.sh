@@ -76,6 +76,13 @@ upgradeChannels() {
     done
 }
 
+cleanupTmpDir() {
+    for ctrl in "$tmpDir"/ssh-*; do
+        ssh -o ControlPath="$ctrl" -O exit dummyhost 2>/dev/null || true
+    done
+    rm -rf "$tmpDir"
+}
+
 while [ "$#" -gt 0 ]; do
     i="$1"; shift 1
     case "$i" in
@@ -475,14 +482,7 @@ if [[ ${#tmpDir} -ge 60 ]]; then
     rmdir "$tmpDir"
     tmpDir=$(TMPDIR= mktemp -t -d nixos-rebuild.XXXXXX)
 fi
-
-cleanup() {
-    for ctrl in "$tmpDir"/ssh-*; do
-        ssh -o ControlPath="$ctrl" -O exit dummyhost 2>/dev/null || true
-    done
-    rm -rf "$tmpDir"
-}
-trap cleanup EXIT
+trap cleanupTmpDir EXIT
 
 
 # Re-execute nixos-rebuild from the Nixpkgs tree.
