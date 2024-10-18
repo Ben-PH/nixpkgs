@@ -226,6 +226,24 @@ while [ "$#" -gt 0 ]; do
 done
 
 
+# Verify that user is not trying to use attribute building and flake
+# at the same time
+if [[ -z $buildingAttribute && -n $flake ]]; then
+    log "error: '--flake' cannot be used with '--file' or '--attr'"
+    exit 1
+fi
+if [[ ! -z "$specialisation" && ! "$action" = switch && ! "$action" = test ]]; then
+    log "error: ‘--specialisation’ can only be used with ‘switch’ and ‘test’"
+    exit 1
+fi
+if [ "$action" = edit && -z $buildingAttribute ]; then
+    log "error: '--file' and '--attr' are not supported with 'edit'"
+    exit 1
+fi
+if [ -z "$action" ]; then
+    showSyntax;
+    logVerbose "error: Must supply command"
+fi
 
 buildHostCmd() {
     local c
@@ -389,15 +407,6 @@ nixFlakeBuild() {
 }
 
 
-if [ -z "$action" ]; then showSyntax; fi
-
-
-# Verify that user is not trying to use attribute building and flake
-# at the same time
-if [[ -z $buildingAttribute && -n $flake ]]; then
-    log "error: '--flake' cannot be used with '--file' or '--attr'"
-    exit 1
-fi
 
 # If ‘--upgrade’ or `--upgrade-all` is given,
 # run ‘nix-channel --update nixos’.
@@ -454,11 +463,6 @@ if [[ -n $flake ]]; then
     fi
 fi
 
-if [[ ! -z "$specialisation" && ! "$action" = switch && ! "$action" = test ]]; then
-    log "error: ‘--specialisation’ can only be used with ‘switch’ and ‘test’"
-    exit 1
-fi
-
 tmpDir=$(mktemp -t -d nixos-rebuild.XXXXXX)
 
 if [[ ${#tmpDir} -ge 60 ]]; then
@@ -504,10 +508,7 @@ fi
 
 # Find configuration.nix and open editor instead of building.
 if [ "$action" = edit ]; then
-    if [[ -z $buildingAttribute ]]; then
-        log "error: '--file' and '--attr' are not supported with 'edit'"
-        exit 1
-    elif [[ -z $flake ]]; then
+    if [[ -z $flake ]]; then
         NIXOS_CONFIG=${NIXOS_CONFIG:-$(runCmd nix-instantiate --find-file nixos-config)}
         if [[ -d $NIXOS_CONFIG ]]; then
             NIXOS_CONFIG=$NIXOS_CONFIG/default.nix
