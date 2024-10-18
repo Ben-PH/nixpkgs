@@ -14,6 +14,25 @@ showSyntax() {
     exit 1
 }
 
+# log the given argument to stderr if verbose mode is on
+logVerbose() {
+    if [ -n "$verboseScript" ]; then
+      echo "$@" >&2
+    fi
+}
+
+# Run a command, logging it first if verbose mode is on
+runCmd() {
+    logVerbose "$" "$@"
+    "$@"
+}
+
+# log the given argument to stderr
+log() {
+    echo "$@" >&2
+}
+
+
 
 # Parse the command line.
 origArgs=("$@")
@@ -41,11 +60,6 @@ buildFile=default.nix
 buildingAttribute=1
 installBootloader=
 json=
-
-# log the given argument to stderr
-log() {
-    echo "$@" >&2
-}
 
 while [ "$#" -gt 0 ]; do
     i="$1"; shift 1
@@ -205,18 +219,7 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-# log the given argument to stderr if verbose mode is on
-logVerbose() {
-    if [ -n "$verboseScript" ]; then
-      echo "$@" >&2
-    fi
-}
 
-# Run a command, logging it first if verbose mode is on
-runCmd() {
-    logVerbose "$" "$@"
-    "$@"
-}
 
 buildHostCmd() {
     local c
