@@ -83,6 +83,32 @@ cleanupTmpDir() {
     rm -rf "$tmpDir"
 }
 
+flakeSetup() {
+    # Use /etc/nixos/flake.nix if it exists. It can be a symlink to the
+    # actual flake.
+    if [[ -z $flake && -e /etc/nixos/flake.nix && -z $noFlake ]]; then
+        flake="$(dirname "$(readlink -f /etc/nixos/flake.nix)")"
+    fi
+
+    # For convenience, use the hostname as the default configuration to
+    # build from the flake.
+    if [[ -n $flake ]]; then
+        if [[ $flake =~ ^(.*)\#([^\#\"]*)$ ]]; then
+           flake="${BASH_REMATCH[1]}"
+           flakeAttr="${BASH_REMATCH[2]}"
+        fi
+        if [[ -z $flakeAttr ]]; then
+            hostname="$(targetHostCmd cat /proc/sys/kernel/hostname)"
+            if [[ -z $hostname ]]; then
+                hostname=default
+            fi
+            flakeAttr="nixosConfigurations.\"$hostname\""
+        else
+            flakeAttr="nixosConfigurations.\"$flakeAttr\""
+        fi
+    fi
+}
+
 while [ "$#" -gt 0 ]; do
     i="$1"; shift 1
     case "$i" in
@@ -450,32 +476,9 @@ if [ -z "$_NIXOS_REBUILD_REEXEC" ]; then
     export PATH=@nix@/bin:$PATH
 fi
 
-# Use /etc/nixos/flake.nix if it exists. It can be a symlink to the
-# actual flake.
-if [[ -z $flake && -e /etc/nixos/flake.nix && -z $noFlake ]]; then
-    flake="$(dirname "$(readlink -f /etc/nixos/flake.nix)")"
-fi
-
-# For convenience, use the hostname as the default configuration to
-# build from the flake.
-if [[ -n $flake ]]; then
-    if [[ $flake =~ ^(.*)\#([^\#\"]*)$ ]]; then
-       flake="${BASH_REMATCH[1]}"
-       flakeAttr="${BASH_REMATCH[2]}"
-    fi
-    if [[ -z $flakeAttr ]]; then
-        hostname="$(targetHostCmd cat /proc/sys/kernel/hostname)"
-        if [[ -z $hostname ]]; then
-            hostname=default
-        fi
-        flakeAttr="nixosConfigurations.\"$hostname\""
-    else
-        flakeAttr="nixosConfigurations.\"$flakeAttr\""
-    fi
-fi
+flakeSetup
 
 tmpDir=$(mktemp -t -d nixos-rebuild.XXXXXX)
-
 if [[ ${#tmpDir} -ge 60 ]]; then
     # Very long tmp dirs lead to "too long for Unix domain socket"
     # SSH ControlPath errors. Especially macOS sets long TMPDIR paths.
