@@ -24,6 +24,7 @@ flakeFlags=(--extra-experimental-features 'nix-command flakes')
 action=
 buildNix=1
 fast=
+canRun=
 rollback=
 upgrade=
 upgrade_all=
@@ -54,6 +55,14 @@ while [ "$#" -gt 0 ]; do
         ;;
       switch|boot|test|build|edit|repl|dry-build|dry-run|dry-activate|build-vm|build-vm-with-bootloader|list-generations)
         if [ "$i" = dry-run ]; then i=dry-build; fi
+        # Only run shell scripts from the Nixpkgs tree if the action is
+        # "switch", "boot", or "test". With other actions (such as "build"),
+        # the user may reasonably expect that no code from the Nixpkgs tree is
+        # executed, so it's safe to run nixos-rebuild against a potentially
+        # untrusted tree.
+        if [[ "$i" = switch || "$i" = boot || "$i" = test ]]; then
+            canRun=1
+        fi
         if [ "$i" = list-generations ]; then
             buildNix=
             fast=1
@@ -373,15 +382,6 @@ nixFlakeBuild() {
 
 if [ -z "$action" ]; then showSyntax; fi
 
-# Only run shell scripts from the Nixpkgs tree if the action is
-# "switch", "boot", or "test". With other actions (such as "build"),
-# the user may reasonably expect that no code from the Nixpkgs tree is
-# executed, so it's safe to run nixos-rebuild against a potentially
-# untrusted tree.
-canRun=
-if [[ "$action" = switch || "$action" = boot || "$action" = test ]]; then
-    canRun=1
-fi
 
 # Verify that user is not trying to use attribute building and flake
 # at the same time
