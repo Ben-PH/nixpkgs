@@ -122,6 +122,77 @@ openEditor() {
     exit 1
 }
 
+runRepl(){
+    # This is a very end user command, implemented using sub-optimal means.
+    # You should feel free to improve its behavior, as well as resolve tech
+    # debt in "breaking" ways. Humans adapt quite well.
+    if [[ -z $buildingAttribute ]]; then
+        exec nix repl --file $buildFile $attr "${extraBuildFlags[@]}"
+    elif [[ -z $flake ]]; then
+        exec nix repl --file '<nixpkgs/nixos>' "${extraBuildFlags[@]}"
+    else
+        if [[ -n "${lockFlags[0]}" ]]; then
+            # nix repl itself does not support locking flags
+            log "nixos-rebuild repl does not support locking flags yet"
+            exit 1
+        fi
+        d='$'
+        q='"'
+        bold="$(echo -e '\033[1m')"
+        blue="$(echo -e '\033[34;1m')"
+        attention="$(echo -e '\033[35;1m')"
+        reset="$(echo -e '\033[0m')"
+        if [[ -e $flake ]]; then
+            flakePath=$(realpath "$flake")
+        else
+            flakePath=$flake
+        fi
+        # This nix repl invocation is impure, because usually the flakeref is.
+        # For a solution that preserves the motd and custom scope, we need
+        # something like https://github.com/NixOS/nix/issues/8679.
+        exec nix repl --impure --expr "
+          let flake = builtins.getFlake ''$flakePath'';
+              configuration = flake.$flakeAttr;
+              motd = ''
+                $d{$q\n$q}
+                Hello and welcome to the NixOS configuration
+                    $flakeAttr
+                    in $flake
+
+                The following is loaded into nix repl's scope:
+
+                    - ${blue}config${reset}   All option values
+                    - ${blue}options${reset}  Option data and metadata
+                    - ${blue}pkgs${reset}     Nixpkgs package set
+                    - ${blue}lib${reset}      Nixpkgs library functions
+                    - other module arguments
+
+                    - ${blue}flake${reset}    Flake outputs, inputs and source info of $flake
+
+                Use tab completion to browse around ${blue}config${reset}.
+
+                Use ${bold}:r${reset} to ${bold}reload${reset} everything after making a change in the flake.
+                  (assuming $flake is a mutable flake ref)
+
+                See ${bold}:?${reset} for more repl commands.
+
+                ${attention}warning:${reset} nixos-rebuild repl does not currently enforce pure evaluation.
+              '';
+              scope =
+                assert configuration._type or null == ''configuration'';
+                assert configuration.class or ''nixos'' == ''nixos'';
+                configuration._module.args //
+                configuration._module.specialArgs //
+                {
+                  inherit (configuration) config options;
+                  lib = configuration.lib or configuration.pkgs.lib;
+                  inherit flake;
+                };
+          in builtins.seq scope builtins.trace motd scope
+        " "${extraBuildFlags[@]}"
+    fi
+}
+
 while [ "$#" -gt 0 ]; do
     i="$1"; shift 1
     case "$i" in
@@ -639,74 +710,7 @@ if [ "$action" = dry-build ]; then
 fi
 
 if [ "$action" = repl ]; then
-    # This is a very end user command, implemented using sub-optimal means.
-    # You should feel free to improve its behavior, as well as resolve tech
-    # debt in "breaking" ways. Humans adapt quite well.
-    if [[ -z $buildingAttribute ]]; then
-        exec nix repl --file $buildFile $attr "${extraBuildFlags[@]}"
-    elif [[ -z $flake ]]; then
-        exec nix repl --file '<nixpkgs/nixos>' "${extraBuildFlags[@]}"
-    else
-        if [[ -n "${lockFlags[0]}" ]]; then
-            # nix repl itself does not support locking flags
-            log "nixos-rebuild repl does not support locking flags yet"
-            exit 1
-        fi
-        d='$'
-        q='"'
-        bold="$(echo -e '\033[1m')"
-        blue="$(echo -e '\033[34;1m')"
-        attention="$(echo -e '\033[35;1m')"
-        reset="$(echo -e '\033[0m')"
-        if [[ -e $flake ]]; then
-            flakePath=$(realpath "$flake")
-        else
-            flakePath=$flake
-        fi
-        # This nix repl invocation is impure, because usually the flakeref is.
-        # For a solution that preserves the motd and custom scope, we need
-        # something like https://github.com/NixOS/nix/issues/8679.
-        exec nix repl --impure --expr "
-          let flake = builtins.getFlake ''$flakePath'';
-              configuration = flake.$flakeAttr;
-              motd = ''
-                $d{$q\n$q}
-                Hello and welcome to the NixOS configuration
-                    $flakeAttr
-                    in $flake
-
-                The following is loaded into nix repl's scope:
-
-                    - ${blue}config${reset}   All option values
-                    - ${blue}options${reset}  Option data and metadata
-                    - ${blue}pkgs${reset}     Nixpkgs package set
-                    - ${blue}lib${reset}      Nixpkgs library functions
-                    - other module arguments
-
-                    - ${blue}flake${reset}    Flake outputs, inputs and source info of $flake
-
-                Use tab completion to browse around ${blue}config${reset}.
-
-                Use ${bold}:r${reset} to ${bold}reload${reset} everything after making a change in the flake.
-                  (assuming $flake is a mutable flake ref)
-
-                See ${bold}:?${reset} for more repl commands.
-
-                ${attention}warning:${reset} nixos-rebuild repl does not currently enforce pure evaluation.
-              '';
-              scope =
-                assert configuration._type or null == ''configuration'';
-                assert configuration.class or ''nixos'' == ''nixos'';
-                configuration._module.args //
-                configuration._module.specialArgs //
-                {
-                  inherit (configuration) config options;
-                  lib = configuration.lib or configuration.pkgs.lib;
-                  inherit flake;
-                };
-          in builtins.seq scope builtins.trace motd scope
-        " "${extraBuildFlags[@]}"
-    fi
+    runRepl
 fi
 
 if [ "$action" = list-generations ]; then
