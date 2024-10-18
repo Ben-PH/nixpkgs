@@ -61,6 +61,21 @@ buildingAttribute=1
 installBootloader=
 json=
 
+## General helpers
+upgradeChannels() {
+    for channelpath in /nix/var/nix/profiles/per-user/root/channels/*; do
+        channel_name=$(basename "$channelpath")
+
+        if [[ "$channel_name" == "nixos" ]]; then
+            runCmd nix-channel --update "$channel_name"
+        elif [ -e "$channelpath/.update-on-nixos-rebuild" ]; then
+            runCmd nix-channel --update "$channel_name"
+        elif [[ -n $upgrade_all ]] ; then
+            runCmd nix-channel --update "$channel_name"
+        fi
+    done
+}
+
 while [ "$#" -gt 0 ]; do
     i="$1"; shift 1
     case "$i" in
@@ -414,18 +429,7 @@ if [[ -n $upgrade && -z $_NIXOS_REBUILD_REEXEC && -z $flake ]]; then
     # If --upgrade-all is passed, or there are other channels that
     # contain a file called ".update-on-nixos-rebuild", update them as
     # well. Also upgrade the nixos channel.
-
-    for channelpath in /nix/var/nix/profiles/per-user/root/channels/*; do
-        channel_name=$(basename "$channelpath")
-
-        if [[ "$channel_name" == "nixos" ]]; then
-            runCmd nix-channel --update "$channel_name"
-        elif [ -e "$channelpath/.update-on-nixos-rebuild" ]; then
-            runCmd nix-channel --update "$channel_name"
-        elif [[ -n $upgrade_all ]] ; then
-            runCmd nix-channel --update "$channel_name"
-        fi
-    done
+    upgradeChannels
 fi
 
 # Make sure that we use the Nix package we depend on, not something
