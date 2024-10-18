@@ -77,6 +77,11 @@ while [ "$#" -gt 0 ]; do
         if [[ "$i" = switch || "$i" = boot || "$i" = test ]]; then
             canRun=1
         fi
+        # First build Nix, since NixOS may require a newer version than the
+        # current one.
+        if [[ "$i" = dry-build ]]; then
+            buildNix=
+        fi
         if [ "$i" = list-generations ]; then
             buildNix=
             fast=1
@@ -114,6 +119,7 @@ while [ "$#" -gt 0 ]; do
         buildNix=
         ;;
       --rollback)
+        buildNix=
         rollback=1
         ;;
       --upgrade)
@@ -515,11 +521,6 @@ fi
 
 SSHOPTS="$NIX_SSHOPTS -o ControlMaster=auto -o ControlPath=$tmpDir/ssh-%n -o ControlPersist=60"
 
-# First build Nix, since NixOS may require a newer version than the
-# current one.
-if [[ -n "$rollback" || "$action" = dry-build ]]; then
-    buildNix=
-fi
 
 nixSystem() {
     machine="$(uname -m)"
