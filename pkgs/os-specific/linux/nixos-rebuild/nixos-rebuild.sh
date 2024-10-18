@@ -14,6 +14,25 @@ showSyntax() {
     exit 1
 }
 
+# log the given argument to stderr if verbose mode is on
+logVerbose() {
+    if [ -n "$verboseScript" ]; then
+      echo "$@" >&2
+    fi
+}
+
+# Run a command, logging it first if verbose mode is on
+runCmd() {
+    logVerbose "$" "$@"
+    "$@"
+}
+
+# log the given argument to stderr
+log() {
+    echo "$@" >&2
+}
+
+
 
 # Parse the command line.
 origArgs=("$@")
@@ -24,6 +43,7 @@ flakeFlags=(--extra-experimental-features 'nix-command flakes')
 action=
 buildNix=1
 fast=
+canRun=
 rollback=
 upgrade=
 upgrade_all=
@@ -41,174 +61,7 @@ buildingAttribute=1
 installBootloader=
 json=
 
-# log the given argument to stderr
-log() {
-    echo "$@" >&2
-}
-
-while [ "$#" -gt 0 ]; do
-    i="$1"; shift 1
-    case "$i" in
-      --help)
-        showSyntax
-        ;;
-      switch|boot|test|build|edit|repl|dry-build|dry-run|dry-activate|build-vm|build-vm-with-bootloader|list-generations)
-        if [ "$i" = dry-run ]; then i=dry-build; fi
-        if [ "$i" = list-generations ]; then
-            buildNix=
-            fast=1
-        fi
-        # exactly one action mandatory, bail out if multiple are given
-        if [ -n "$action" ]; then showSyntax; fi
-        action="$i"
-        ;;
-      --file|-f)
-        if [ -z "$1" ]; then
-            log "$0: '$i' requires an argument"
-            exit 1
-        fi
-        buildFile="$1"
-        buildingAttribute=
-        shift 1
-        ;;
-      --attr|-A)
-        if [ -z "$1" ]; then
-            log "$0: '$i' requires an argument"
-            exit 1
-        fi
-        attr="$1"
-        buildingAttribute=
-        shift 1
-        ;;
-      --install-grub)
-        log "$0: --install-grub deprecated, use --install-bootloader instead"
-        installBootloader=1
-        ;;
-      --install-bootloader)
-        installBootloader=1
-        ;;
-      --no-build-nix)
-        buildNix=
-        ;;
-      --rollback)
-        rollback=1
-        ;;
-      --upgrade)
-        upgrade=1
-        ;;
-      --upgrade-all)
-        upgrade=1
-        upgrade_all=1
-        ;;
-      --use-substitutes|--substitute-on-destination|-s)
-        copyFlags+=("-s")
-        ;;
-      -I|--builders)
-        j="$1"; shift 1
-        extraBuildFlags+=("$i" "$j")
-        ;;
-      --max-jobs|-j|--cores|--log-format)
-        j="$1"; shift 1
-        extraBuildFlags+=("$i" "$j")
-        copyFlags+=("$i" "$j")
-        ;;
-      --accept-flake-config|-j*|--quiet|--print-build-logs|-L|--no-build-output|-Q|--show-trace|--refresh|--impure|--offline|--no-net)
-        extraBuildFlags+=("$i")
-        ;;
-      --keep-going|-k|--keep-failed|-K|--fallback|--repair)
-        extraBuildFlags+=("$i")
-        copyFlags+=("$i")
-        ;;
-      --verbose|-v|-vv|-vvv|-vvvv|-vvvvv)
-        verboseScript="true"
-        extraBuildFlags+=("$i")
-        copyFlags+=("$i")
-        ;;
-      --option)
-        j="$1"; shift 1
-        k="$1"; shift 1
-        extraBuildFlags+=("$i" "$j" "$k")
-        copyFlags+=("$i" "$j" "$k")
-        ;;
-      --fast)
-        buildNix=
-        fast=1
-        ;;
-      --profile-name|-p)
-        if [ -z "$1" ]; then
-            log "$0: ‘--profile-name’ requires an argument"
-            exit 1
-        fi
-        if [ "$1" != system ]; then
-            profile="/nix/var/nix/profiles/system-profiles/$1"
-            mkdir -p -m 0755 "$(dirname "$profile")"
-        fi
-        shift 1
-        ;;
-      --specialisation|-c)
-        if [ -z "$1" ]; then
-            log "$0: ‘--specialisation’ requires an argument"
-            exit 1
-        fi
-        specialisation="$1"
-        shift 1
-        ;;
-      --build-host)
-        buildHost="$1"
-        shift 1
-        ;;
-      --target-host)
-        targetHost="$1"
-        shift 1
-        ;;
-      --use-remote-sudo)
-        remoteSudo=1
-        ;;
-      --no-ssh-tty)
-        noSSHTTY=1
-        ;;
-      --flake)
-        flake="$1"
-        shift 1
-        ;;
-      --no-flake)
-        noFlake=1
-        ;;
-      --recreate-lock-file|--no-update-lock-file|--no-write-lock-file|--no-registries|--commit-lock-file)
-        lockFlags+=("$i")
-        ;;
-      --update-input)
-        j="$1"; shift 1
-        lockFlags+=("$i" "$j")
-        ;;
-      --override-input)
-        j="$1"; shift 1
-        k="$1"; shift 1
-        lockFlags+=("$i" "$j" "$k")
-        ;;
-      --json)
-        json=1
-        ;;
-      *)
-        log "$0: unknown option \`$i'"
-        exit 1
-        ;;
-    esac
-done
-
-# log the given argument to stderr if verbose mode is on
-logVerbose() {
-    if [ -n "$verboseScript" ]; then
-      echo "$@" >&2
-    fi
-}
-
-# Run a command, logging it first if verbose mode is on
-runCmd() {
-    logVerbose "$" "$@"
-    "$@"
-}
-
+## General helpers
 buildHostCmd() {
     local c
     if [[ "${useSudo:-x}" = 1 ]]; then
@@ -370,154 +223,6 @@ nixFlakeBuild() {
     fi
 }
 
-
-if [ -z "$action" ]; then showSyntax; fi
-
-# Only run shell scripts from the Nixpkgs tree if the action is
-# "switch", "boot", or "test". With other actions (such as "build"),
-# the user may reasonably expect that no code from the Nixpkgs tree is
-# executed, so it's safe to run nixos-rebuild against a potentially
-# untrusted tree.
-canRun=
-if [[ "$action" = switch || "$action" = boot || "$action" = test ]]; then
-    canRun=1
-fi
-
-# Verify that user is not trying to use attribute building and flake
-# at the same time
-if [[ -z $buildingAttribute && -n $flake ]]; then
-    log "error: '--flake' cannot be used with '--file' or '--attr'"
-    exit 1
-fi
-
-# If ‘--upgrade’ or `--upgrade-all` is given,
-# run ‘nix-channel --update nixos’.
-if [[ -n $upgrade && -z $_NIXOS_REBUILD_REEXEC && -z $flake ]]; then
-    # If --upgrade-all is passed, or there are other channels that
-    # contain a file called ".update-on-nixos-rebuild", update them as
-    # well. Also upgrade the nixos channel.
-
-    for channelpath in /nix/var/nix/profiles/per-user/root/channels/*; do
-        channel_name=$(basename "$channelpath")
-
-        if [[ "$channel_name" == "nixos" ]]; then
-            runCmd nix-channel --update "$channel_name"
-        elif [ -e "$channelpath/.update-on-nixos-rebuild" ]; then
-            runCmd nix-channel --update "$channel_name"
-        elif [[ -n $upgrade_all ]] ; then
-            runCmd nix-channel --update "$channel_name"
-        fi
-    done
-fi
-
-# Make sure that we use the Nix package we depend on, not something
-# else from the PATH for nix-{env,instantiate,build}.  This is
-# important, because NixOS defaults the architecture of the rebuilt
-# system to the architecture of the nix-* binaries used.  So if on an
-# amd64 system the user has an i686 Nix package in her PATH, then we
-# would silently downgrade the whole system to be i686 NixOS on the
-# next reboot.
-if [ -z "$_NIXOS_REBUILD_REEXEC" ]; then
-    export PATH=@nix@/bin:$PATH
-fi
-
-# Use /etc/nixos/flake.nix if it exists. It can be a symlink to the
-# actual flake.
-if [[ -z $flake && -e /etc/nixos/flake.nix && -z $noFlake ]]; then
-    flake="$(dirname "$(readlink -f /etc/nixos/flake.nix)")"
-fi
-
-# For convenience, use the hostname as the default configuration to
-# build from the flake.
-if [[ -n $flake ]]; then
-    if [[ $flake =~ ^(.*)\#([^\#\"]*)$ ]]; then
-       flake="${BASH_REMATCH[1]}"
-       flakeAttr="${BASH_REMATCH[2]}"
-    fi
-    if [[ -z $flakeAttr ]]; then
-        hostname="$(targetHostCmd cat /proc/sys/kernel/hostname)"
-        if [[ -z $hostname ]]; then
-            hostname=default
-        fi
-        flakeAttr="nixosConfigurations.\"$hostname\""
-    else
-        flakeAttr="nixosConfigurations.\"$flakeAttr\""
-    fi
-fi
-
-if [[ ! -z "$specialisation" && ! "$action" = switch && ! "$action" = test ]]; then
-    log "error: ‘--specialisation’ can only be used with ‘switch’ and ‘test’"
-    exit 1
-fi
-
-tmpDir=$(mktemp -t -d nixos-rebuild.XXXXXX)
-
-if [[ ${#tmpDir} -ge 60 ]]; then
-    # Very long tmp dirs lead to "too long for Unix domain socket"
-    # SSH ControlPath errors. Especially macOS sets long TMPDIR paths.
-    rmdir "$tmpDir"
-    tmpDir=$(TMPDIR= mktemp -t -d nixos-rebuild.XXXXXX)
-fi
-
-cleanup() {
-    for ctrl in "$tmpDir"/ssh-*; do
-        ssh -o ControlPath="$ctrl" -O exit dummyhost 2>/dev/null || true
-    done
-    rm -rf "$tmpDir"
-}
-trap cleanup EXIT
-
-
-# Re-execute nixos-rebuild from the Nixpkgs tree.
-if [[ -z $_NIXOS_REBUILD_REEXEC && -n $canRun && -z $fast ]]; then
-    if [[ -z $buildingAttribute ]]; then
-        p=$(runCmd nix-build --no-out-link $buildFile -A "${attr:+$attr.}config.system.build.nixos-rebuild" "${extraBuildFlags[@]}")
-        SHOULD_REEXEC=1
-    elif [[ -z $flake ]]; then
-        if p=$(runCmd nix-build --no-out-link --expr 'with import <nixpkgs/nixos> {}; config.system.build.nixos-rebuild' "${extraBuildFlags[@]}"); then
-            SHOULD_REEXEC=1
-        fi
-    else
-        runCmd nix "${flakeFlags[@]}" build --out-link "${tmpDir}/nixos-rebuild" "$flake#$flakeAttr.config.system.build.nixos-rebuild" "${extraBuildFlags[@]}" "${lockFlags[@]}"
-        if p=$(readlink -e "${tmpDir}/nixos-rebuild"); then
-            SHOULD_REEXEC=1
-        fi
-    fi
-
-    if [[ -n $SHOULD_REEXEC ]]; then
-        export _NIXOS_REBUILD_REEXEC=1
-        # Manually call cleanup as the EXIT trap is not triggered when using exec
-        cleanup
-        runCmd exec "$p/bin/nixos-rebuild" "${origArgs[@]}"
-        exit 1
-    fi
-fi
-
-# Find configuration.nix and open editor instead of building.
-if [ "$action" = edit ]; then
-    if [[ -z $buildingAttribute ]]; then
-        log "error: '--file' and '--attr' are not supported with 'edit'"
-        exit 1
-    elif [[ -z $flake ]]; then
-        NIXOS_CONFIG=${NIXOS_CONFIG:-$(runCmd nix-instantiate --find-file nixos-config)}
-        if [[ -d $NIXOS_CONFIG ]]; then
-            NIXOS_CONFIG=$NIXOS_CONFIG/default.nix
-        fi
-        runCmd exec ${EDITOR:-nano} "$NIXOS_CONFIG"
-    else
-        runCmd exec nix "${flakeFlags[@]}" edit "${lockFlags[@]}" -- "$flake#$flakeAttr"
-    fi
-    exit 1
-fi
-
-SSHOPTS="$NIX_SSHOPTS -o ControlMaster=auto -o ControlPath=$tmpDir/ssh-%n -o ControlPersist=60"
-
-# First build Nix, since NixOS may require a newer version than the
-# current one.
-if [[ -n "$rollback" || "$action" = dry-build ]]; then
-    buildNix=
-fi
-
 nixSystem() {
     machine="$(uname -m)"
     if [[ "$machine" =~ i.86 ]]; then
@@ -590,41 +295,67 @@ getVersion() {
     fi
 }
 
+upgradeChannels() {
+    for channelpath in /nix/var/nix/profiles/per-user/root/channels/*; do
+        channel_name=$(basename "$channelpath")
 
-if [[ -n $buildNix && -z $flake ]]; then
-    log "building Nix..."
-    getNixDrv
-    if [ -a "$nixDrv" ]; then
-        nix-store -r "$nixDrv"'!'"out" --add-root "$tmpDir/nix" --indirect >/dev/null
-        if [ -n "$buildHost" ]; then
-            nix-copy-closure "${copyFlags[@]}" --to "$buildHost" "$nixDrv"
-            # The nix build produces multiple outputs, we add them all to the remote path
-            for p in $(buildHostCmd nix-store -r "$(readlink "$nixDrv")" "${buildArgs[@]}"); do
-                remoteNix="$remoteNix${remoteNix:+:}$p/bin"
-            done
+        if [[ "$channel_name" == "nixos" ]]; then
+            runCmd nix-channel --update "$channel_name"
+        elif [ -e "$channelpath/.update-on-nixos-rebuild" ]; then
+            runCmd nix-channel --update "$channel_name"
+        elif [[ -n $upgrade_all ]] ; then
+            runCmd nix-channel --update "$channel_name"
+        fi
+    done
+}
+
+cleanupTmpDir() {
+    for ctrl in "$tmpDir"/ssh-*; do
+        ssh -o ControlPath="$ctrl" -O exit dummyhost 2>/dev/null || true
+    done
+    rm -rf "$tmpDir"
+}
+
+flakeSetup() {
+    # Use /etc/nixos/flake.nix if it exists. It can be a symlink to the
+    # actual flake.
+    if [[ -z $flake && -e /etc/nixos/flake.nix && -z $noFlake ]]; then
+        flake="$(dirname "$(readlink -f /etc/nixos/flake.nix)")"
+    fi
+
+    # For convenience, use the hostname as the default configuration to
+    # build from the flake.
+    if [[ -n $flake ]]; then
+        if [[ $flake =~ ^(.*)\#([^\#\"]*)$ ]]; then
+           flake="${BASH_REMATCH[1]}"
+           flakeAttr="${BASH_REMATCH[2]}"
+        fi
+        if [[ -z $flakeAttr ]]; then
+            hostname="$(targetHostCmd cat /proc/sys/kernel/hostname)"
+            if [[ -z $hostname ]]; then
+                hostname=default
+            fi
+            flakeAttr="nixosConfigurations.\"$hostname\""
+        else
+            flakeAttr="nixosConfigurations.\"$flakeAttr\""
         fi
     fi
-    PATH="$tmpDir/nix/bin:$PATH"
-fi
+}
 
-
-# Update the version suffix if we're building from Git (so that
-# nixos-version shows something useful).
-if [[ -n $canRun && -z $flake ]]; then
-    if nixpkgs=$(runCmd nix-instantiate --find-file nixpkgs "${extraBuildFlags[@]}"); then
-        suffix=$(getVersion "$nixpkgs" || true)
-        if [ -n "$suffix" ]; then
-            echo -n "$suffix" > "$nixpkgs/.version-suffix" || true
+openEditor() {
+    if [[ -z $flake ]]; then
+        NIXOS_CONFIG=${NIXOS_CONFIG:-$(runCmd nix-instantiate --find-file nixos-config)}
+        if [[ -d $NIXOS_CONFIG ]]; then
+            NIXOS_CONFIG=$NIXOS_CONFIG/default.nix
         fi
+        runCmd exec ${EDITOR:-nano} "$NIXOS_CONFIG"
+    else
+        runCmd exec nix "${flakeFlags[@]}" edit "${lockFlags[@]}" -- "$flake#$flakeAttr"
     fi
-fi
+    exit 1
+}
 
-
-if [ "$action" = dry-build ]; then
-    extraBuildFlags+=(--dry-run)
-fi
-
-if [ "$action" = repl ]; then
+runRepl(){
     # This is a very end user command, implemented using sub-optimal means.
     # You should feel free to improve its behavior, as well as resolve tech
     # debt in "breaking" ways. Humans adapt quite well.
@@ -693,14 +424,9 @@ if [ "$action" = repl ]; then
           in builtins.seq scope builtins.trace motd scope
         " "${extraBuildFlags[@]}"
     fi
-fi
+}
 
-if [ "$action" = list-generations ]; then
-    if [ ! -L "$profile" ]; then
-        log "No profile \`$(basename "$profile")' found"
-        exit 1
-    fi
-
+listGenerations() {
     generation_from_dir() {
         generation_dir="$1"
         generation_base="$(basename "$generation_dir")" # Has the format "system-123-link" for generation 123
@@ -772,14 +498,12 @@ EOF
         else
             jq --slurp .
         fi
-    exit 0
-fi
-
+}
 
 # Either upgrade the configuration in the system profile (for "switch"
 # or "boot"), or just build it and create a symlink "result" in the
 # current directory (for "build" and "test").
-if [ -z "$rollback" ]; then
+setPathToConfig() {
     log "building the system configuration..."
     if [[ "$action" = switch || "$action" = boot ]]; then
         if [[ -z $buildingAttribute ]]; then
@@ -822,7 +546,10 @@ if [ -z "$rollback" ]; then
     if ! [[ "$action" = switch || "$action" = boot ]]; then
         copyToTarget "$pathToConfig"
     fi
-else # [ -n "$rollback" ]
+}
+
+setPathToConfigRollback() {
+    log "rolling back the system configuration..."
     if [[ "$action" = switch || "$action" = boot ]]; then
         targetHostSudoCmd nix-env --rollback -p "$profile"
         pathToConfig="$profile"
@@ -838,12 +565,10 @@ else # [ -n "$rollback" ]
     else
         showSyntax
     fi
-fi
+}
 
+dispatchSwitchToConfiguration() {
 
-# If we're not just building, then make the new configuration the boot
-# default and/or activate it now.
-if [[ "$action" = switch || "$action" = boot || "$action" = test || "$action" = dry-activate ]]; then
     # Using systemd-run here to protect against PTY failures/network
     # disconnections during rebuild.
     # See: https://github.com/NixOS/nixpkgs/issues/39118
@@ -901,6 +626,318 @@ if [[ "$action" = switch || "$action" = boot || "$action" = test || "$action" = 
         log "warning: error(s) occurred while switching to the new configuration"
         exit 1
     fi
+}
+
+while [ "$#" -gt 0 ]; do
+    i="$1"; shift 1
+    case "$i" in
+      --help)
+        showSyntax
+        ;;
+      switch|boot|test|build|edit|repl|dry-build|dry-run|dry-activate|build-vm|build-vm-with-bootloader|list-generations)
+        if [ "$i" = dry-run ]; then i=dry-build; fi
+        # Only run shell scripts from the Nixpkgs tree if the action is
+        # "switch", "boot", or "test". With other actions (such as "build"),
+        # the user may reasonably expect that no code from the Nixpkgs tree is
+        # executed, so it's safe to run nixos-rebuild against a potentially
+        # untrusted tree.
+        if [[ "$i" = switch || "$i" = boot || "$i" = test ]]; then
+            canRun=1
+        fi
+        # First build Nix, since NixOS may require a newer version than the
+        # current one.
+        if [[ "$i" = dry-build ]]; then
+            buildNix=
+        fi
+        if [ "$i" = list-generations ]; then
+            buildNix=
+            fast=1
+        fi
+        # exactly one action mandatory, bail out if multiple are given
+        if [ -n "$action" ]; then showSyntax; fi
+        action="$i"
+        ;;
+      --file|-f)
+        if [ -z "$1" ]; then
+            log "$0: '$i' requires an argument"
+            exit 1
+        fi
+        buildFile="$1"
+        buildingAttribute=
+        shift 1
+        ;;
+      --attr|-A)
+        if [ -z "$1" ]; then
+            log "$0: '$i' requires an argument"
+            exit 1
+        fi
+        attr="$1"
+        buildingAttribute=
+        shift 1
+        ;;
+      --install-grub)
+        log "$0: --install-grub deprecated, use --install-bootloader instead"
+        installBootloader=1
+        ;;
+      --install-bootloader)
+        installBootloader=1
+        ;;
+      --no-build-nix)
+        buildNix=
+        ;;
+      --rollback)
+        buildNix=
+        rollback=1
+        ;;
+      --upgrade)
+        upgrade=1
+        ;;
+      --upgrade-all)
+        upgrade=1
+        upgrade_all=1
+        ;;
+      --use-substitutes|--substitute-on-destination|-s)
+        copyFlags+=("-s")
+        ;;
+      -I|--builders)
+        j="$1"; shift 1
+        extraBuildFlags+=("$i" "$j")
+        ;;
+      --max-jobs|-j|--cores|--log-format)
+        j="$1"; shift 1
+        extraBuildFlags+=("$i" "$j")
+        copyFlags+=("$i" "$j")
+        ;;
+      --accept-flake-config|-j*|--quiet|--print-build-logs|-L|--no-build-output|-Q|--show-trace|--refresh|--impure|--offline|--no-net)
+        extraBuildFlags+=("$i")
+        ;;
+      --keep-going|-k|--keep-failed|-K|--fallback|--repair)
+        extraBuildFlags+=("$i")
+        copyFlags+=("$i")
+        ;;
+      --verbose|-v|-vv|-vvv|-vvvv|-vvvvv)
+        verboseScript="true"
+        extraBuildFlags+=("$i")
+        copyFlags+=("$i")
+        ;;
+      --option)
+        j="$1"; shift 1
+        k="$1"; shift 1
+        extraBuildFlags+=("$i" "$j" "$k")
+        copyFlags+=("$i" "$j" "$k")
+        ;;
+      --fast)
+        buildNix=
+        fast=1
+        ;;
+      --profile-name|-p)
+        if [ -z "$1" ]; then
+            log "$0: ‘--profile-name’ requires an argument"
+            exit 1
+        fi
+        if [ "$1" != system ]; then
+            profile="/nix/var/nix/profiles/system-profiles/$1"
+            mkdir -p -m 0755 "$(dirname "$profile")"
+        fi
+        shift 1
+        ;;
+      --specialisation|-c)
+        if [ -z "$1" ]; then
+            log "$0: ‘--specialisation’ requires an argument"
+            exit 1
+        fi
+        specialisation="$1"
+        shift 1
+        ;;
+      --build-host)
+        buildHost="$1"
+        shift 1
+        ;;
+      --target-host)
+        targetHost="$1"
+        shift 1
+        ;;
+      --use-remote-sudo)
+        remoteSudo=1
+        ;;
+      --no-ssh-tty)
+        noSSHTTY=1
+        ;;
+      --flake)
+        flake="$1"
+        shift 1
+        ;;
+      --no-flake)
+        noFlake=1
+        ;;
+      --recreate-lock-file|--no-update-lock-file|--no-write-lock-file|--no-registries|--commit-lock-file)
+        lockFlags+=("$i")
+        ;;
+      --update-input)
+        j="$1"; shift 1
+        lockFlags+=("$i" "$j")
+        ;;
+      --override-input)
+        j="$1"; shift 1
+        k="$1"; shift 1
+        lockFlags+=("$i" "$j" "$k")
+        ;;
+      --json)
+        json=1
+        ;;
+      *)
+        log "$0: unknown option \`$i'"
+        exit 1
+        ;;
+    esac
+done
+
+
+# Verify that user is not trying to use attribute building and flake
+# at the same time
+if [[ -z $buildingAttribute && -n $flake ]]; then
+    log "error: '--flake' cannot be used with '--file' or '--attr'"
+    exit 1
+fi
+if [[ ! -z "$specialisation" && ! "$action" = switch && ! "$action" = test ]]; then
+    log "error: ‘--specialisation’ can only be used with ‘switch’ and ‘test’"
+    exit 1
+fi
+if [ "$action" = edit && -z $buildingAttribute ]; then
+    log "error: '--file' and '--attr' are not supported with 'edit'"
+    exit 1
+fi
+if [ -z "$action" ]; then
+    showSyntax;
+    logVerbose "error: Must supply command"
+fi
+
+
+
+
+# If ‘--upgrade’ or `--upgrade-all` is given,
+# run ‘nix-channel --update nixos’.
+if [[ -n $upgrade && -z $_NIXOS_REBUILD_REEXEC && -z $flake ]]; then
+    # If --upgrade-all is passed, or there are other channels that
+    # contain a file called ".update-on-nixos-rebuild", update them as
+    # well. Also upgrade the nixos channel.
+    upgradeChannels
+fi
+
+# Make sure that we use the Nix package we depend on, not something
+# else from the PATH for nix-{env,instantiate,build}.  This is
+# important, because NixOS defaults the architecture of the rebuilt
+# system to the architecture of the nix-* binaries used.  So if on an
+# amd64 system the user has an i686 Nix package in her PATH, then we
+# would silently downgrade the whole system to be i686 NixOS on the
+# next reboot.
+if [ -z "$_NIXOS_REBUILD_REEXEC" ]; then
+    export PATH=@nix@/bin:$PATH
+fi
+
+flakeSetup
+
+tmpDir=$(mktemp -t -d nixos-rebuild.XXXXXX)
+if [[ ${#tmpDir} -ge 60 ]]; then
+    # Very long tmp dirs lead to "too long for Unix domain socket"
+    # SSH ControlPath errors. Especially macOS sets long TMPDIR paths.
+    rmdir "$tmpDir"
+    tmpDir=$(TMPDIR= mktemp -t -d nixos-rebuild.XXXXXX)
+fi
+trap cleanupTmpDir EXIT
+
+
+# Re-execute nixos-rebuild from the Nixpkgs tree.
+if [[ -z $_NIXOS_REBUILD_REEXEC && -n $canRun && -z $fast ]]; then
+    if [[ -z $buildingAttribute ]]; then
+        p=$(runCmd nix-build --no-out-link $buildFile -A "${attr:+$attr.}config.system.build.nixos-rebuild" "${extraBuildFlags[@]}")
+        SHOULD_REEXEC=1
+    elif [[ -z $flake ]]; then
+        if p=$(runCmd nix-build --no-out-link --expr 'with import <nixpkgs/nixos> {}; config.system.build.nixos-rebuild' "${extraBuildFlags[@]}"); then
+            SHOULD_REEXEC=1
+        fi
+    else
+        runCmd nix "${flakeFlags[@]}" build --out-link "${tmpDir}/nixos-rebuild" "$flake#$flakeAttr.config.system.build.nixos-rebuild" "${extraBuildFlags[@]}" "${lockFlags[@]}"
+        if p=$(readlink -e "${tmpDir}/nixos-rebuild"); then
+            SHOULD_REEXEC=1
+        fi
+    fi
+
+    if [[ -n $SHOULD_REEXEC ]]; then
+        export _NIXOS_REBUILD_REEXEC=1
+        # Manually call cleanup as the EXIT trap is not triggered when using exec
+        cleanup
+        runCmd exec "$p/bin/nixos-rebuild" "${origArgs[@]}"
+        exit 1
+    fi
+fi
+
+# Open editor instead of building.
+if [ "$action" = edit ]; then openEditor; fi
+
+SSHOPTS="$NIX_SSHOPTS -o ControlMaster=auto -o ControlPath=$tmpDir/ssh-%n -o ControlPersist=60"
+
+
+
+if [[ -n $buildNix && -z $flake ]]; then
+    log "building Nix..."
+    getNixDrv
+    if [ -a "$nixDrv" ]; then
+        nix-store -r "$nixDrv"'!'"out" --add-root "$tmpDir/nix" --indirect >/dev/null
+        if [ -n "$buildHost" ]; then
+            nix-copy-closure "${copyFlags[@]}" --to "$buildHost" "$nixDrv"
+            # The nix build produces multiple outputs, we add them all to the remote path
+            for p in $(buildHostCmd nix-store -r "$(readlink "$nixDrv")" "${buildArgs[@]}"); do
+                remoteNix="$remoteNix${remoteNix:+:}$p/bin"
+            done
+        fi
+    fi
+    PATH="$tmpDir/nix/bin:$PATH"
+fi
+
+
+# Update the version suffix if we're building from Git (so that
+# nixos-version shows something useful).
+if [[ -n $canRun && -z $flake ]]; then
+    if nixpkgs=$(runCmd nix-instantiate --find-file nixpkgs "${extraBuildFlags[@]}"); then
+        suffix=$(getVersion "$nixpkgs" || true)
+        if [ -n "$suffix" ]; then
+            echo -n "$suffix" > "$nixpkgs/.version-suffix" || true
+        fi
+    fi
+fi
+
+
+if [ "$action" = dry-build ]; then
+    extraBuildFlags+=(--dry-run)
+fi
+
+if [ "$action" = repl ]; then
+    runRepl
+fi
+
+if [ "$action" = list-generations ]; then
+    if [ ! -L "$profile" ]; then
+        log "No profile \`$(basename "$profile")' found"
+        exit 1
+    fi
+
+    listGenerations
+    exit 0
+fi
+
+
+if [ -z "$rollback" ]; then
+    setPathToConfig
+else # [ -n "$rollback" ]
+    setPathToConfigRollback
+fi
+
+
+# If we're not just building, then make the new configuration the boot
+# default and/or activate it now.
+if [[ "$action" = switch || "$action" = boot || "$action" = test || "$action" = dry-activate ]]; then
+    dispatchSwitchToConfiguration
 fi
 
 
