@@ -266,6 +266,73 @@ EOF
             jq --slurp .
         fi
 }
+
+# Either upgrade the configuration in the system profile (for "switch"
+# or "boot"), or just build it and create a symlink "result" in the
+# current directory (for "build" and "test").
+setPathToConfig() {
+    log "building the system configuration..."
+    if [[ "$action" = switch || "$action" = boot ]]; then
+        if [[ -z $buildingAttribute ]]; then
+            pathToConfig="$(nixBuild $buildFile -A "${attr:+$attr.}config.system.build.toplevel" "${extraBuildFlags[@]}")"
+        elif [[ -z $flake ]]; then
+            pathToConfig="$(nixBuild '<nixpkgs/nixos>' --no-out-link -A system "${extraBuildFlags[@]}")"
+        else
+            pathToConfig="$(nixFlakeBuild "$flake#$flakeAttr.config.system.build.toplevel" "${extraBuildFlags[@]}" "${lockFlags[@]}")"
+        fi
+        copyToTarget "$pathToConfig"
+        targetHostSudoCmd nix-env -p "$profile" --set "$pathToConfig"
+    elif [[ "$action" = test || "$action" = build || "$action" = dry-build || "$action" = dry-activate ]]; then
+        if [[ -z $buildingAttribute ]]; then
+            pathToConfig="$(nixBuild $buildFile -A "${attr:+$attr.}config.system.build.toplevel" "${extraBuildFlags[@]}")"
+        elif [[ -z $flake ]]; then
+            pathToConfig="$(nixBuild '<nixpkgs/nixos>' -A system -k "${extraBuildFlags[@]}")"
+        else
+            pathToConfig="$(nixFlakeBuild "$flake#$flakeAttr.config.system.build.toplevel" "${extraBuildFlags[@]}" "${lockFlags[@]}")"
+        fi
+    elif [ "$action" = build-vm ]; then
+        if [[ -z $buildingAttribute ]]; then
+            pathToConfig="$(nixBuild $buildFile -A "${attr:+$attr.}config.system.build.vm" "${extraBuildFlags[@]}")"
+        elif [[ -z $flake ]]; then
+            pathToConfig="$(nixBuild '<nixpkgs/nixos>' -A vm -k "${extraBuildFlags[@]}")"
+        else
+            pathToConfig="$(nixFlakeBuild "$flake#$flakeAttr.config.system.build.vm" "${extraBuildFlags[@]}" "${lockFlags[@]}")"
+        fi
+    elif [ "$action" = build-vm-with-bootloader ]; then
+        if [[ -z $buildingAttribute ]]; then
+            pathToConfig="$(nixBuild $buildFile -A "${attr:+$attr.}config.system.build.vmWithBootLoader" "${extraBuildFlags[@]}")"
+        elif [[ -z $flake ]]; then
+            pathToConfig="$(nixBuild '<nixpkgs/nixos>' -A vmWithBootLoader -k "${extraBuildFlags[@]}")"
+        else
+            pathToConfig="$(nixFlakeBuild "$flake#$flakeAttr.config.system.build.vmWithBootLoader" "${extraBuildFlags[@]}" "${lockFlags[@]}")"
+        fi
+    else
+        showSyntax
+    fi
+    # Copy build to target host if we haven't already done it
+    if ! [[ "$action" = switch || "$action" = boot ]]; then
+        copyToTarget "$pathToConfig"
+    fi
+}
+
+setPathToConfigRollback() {
+    log "rolling back the system configuration..."
+    if [[ "$action" = switch || "$action" = boot ]]; then
+        targetHostSudoCmd nix-env --rollback -p "$profile"
+        pathToConfig="$profile"
+    elif [[ "$action" = test || "$action" = build ]]; then
+        systemNumber=$(
+            targetHostCmd nix-env -p "$profile" --list-generations |
+            sed -n '/current/ {g; p;}; s/ *\([0-9]*\).*/\1/; h'
+        )
+        pathToConfig="$profile"-${systemNumber}-link
+        if [ -z "$targetHost" ]; then
+            ln -sT "$pathToConfig" ./result
+        fi
+    else
+        showSyntax
+    fi
+}
 while [ "$#" -gt 0 ]; do
     i="$1"; shift 1
     case "$i" in
@@ -797,68 +864,10 @@ if [ "$action" = list-generations ]; then
 fi
 
 
-# Either upgrade the configuration in the system profile (for "switch"
-# or "boot"), or just build it and create a symlink "result" in the
-# current directory (for "build" and "test").
 if [ -z "$rollback" ]; then
-    log "building the system configuration..."
-    if [[ "$action" = switch || "$action" = boot ]]; then
-        if [[ -z $buildingAttribute ]]; then
-            pathToConfig="$(nixBuild $buildFile -A "${attr:+$attr.}config.system.build.toplevel" "${extraBuildFlags[@]}")"
-        elif [[ -z $flake ]]; then
-            pathToConfig="$(nixBuild '<nixpkgs/nixos>' --no-out-link -A system "${extraBuildFlags[@]}")"
-        else
-            pathToConfig="$(nixFlakeBuild "$flake#$flakeAttr.config.system.build.toplevel" "${extraBuildFlags[@]}" "${lockFlags[@]}")"
-        fi
-        copyToTarget "$pathToConfig"
-        targetHostSudoCmd nix-env -p "$profile" --set "$pathToConfig"
-    elif [[ "$action" = test || "$action" = build || "$action" = dry-build || "$action" = dry-activate ]]; then
-        if [[ -z $buildingAttribute ]]; then
-            pathToConfig="$(nixBuild $buildFile -A "${attr:+$attr.}config.system.build.toplevel" "${extraBuildFlags[@]}")"
-        elif [[ -z $flake ]]; then
-            pathToConfig="$(nixBuild '<nixpkgs/nixos>' -A system -k "${extraBuildFlags[@]}")"
-        else
-            pathToConfig="$(nixFlakeBuild "$flake#$flakeAttr.config.system.build.toplevel" "${extraBuildFlags[@]}" "${lockFlags[@]}")"
-        fi
-    elif [ "$action" = build-vm ]; then
-        if [[ -z $buildingAttribute ]]; then
-            pathToConfig="$(nixBuild $buildFile -A "${attr:+$attr.}config.system.build.vm" "${extraBuildFlags[@]}")"
-        elif [[ -z $flake ]]; then
-            pathToConfig="$(nixBuild '<nixpkgs/nixos>' -A vm -k "${extraBuildFlags[@]}")"
-        else
-            pathToConfig="$(nixFlakeBuild "$flake#$flakeAttr.config.system.build.vm" "${extraBuildFlags[@]}" "${lockFlags[@]}")"
-        fi
-    elif [ "$action" = build-vm-with-bootloader ]; then
-        if [[ -z $buildingAttribute ]]; then
-            pathToConfig="$(nixBuild $buildFile -A "${attr:+$attr.}config.system.build.vmWithBootLoader" "${extraBuildFlags[@]}")"
-        elif [[ -z $flake ]]; then
-            pathToConfig="$(nixBuild '<nixpkgs/nixos>' -A vmWithBootLoader -k "${extraBuildFlags[@]}")"
-        else
-            pathToConfig="$(nixFlakeBuild "$flake#$flakeAttr.config.system.build.vmWithBootLoader" "${extraBuildFlags[@]}" "${lockFlags[@]}")"
-        fi
-    else
-        showSyntax
-    fi
-    # Copy build to target host if we haven't already done it
-    if ! [[ "$action" = switch || "$action" = boot ]]; then
-        copyToTarget "$pathToConfig"
-    fi
+    setPathToConfig
 else # [ -n "$rollback" ]
-    if [[ "$action" = switch || "$action" = boot ]]; then
-        targetHostSudoCmd nix-env --rollback -p "$profile"
-        pathToConfig="$profile"
-    elif [[ "$action" = test || "$action" = build ]]; then
-        systemNumber=$(
-            targetHostCmd nix-env -p "$profile" --list-generations |
-            sed -n '/current/ {g; p;}; s/ *\([0-9]*\).*/\1/; h'
-        )
-        pathToConfig="$profile"-${systemNumber}-link
-        if [ -z "$targetHost" ]; then
-            ln -sT "$pathToConfig" ./result
-        fi
-    else
-        showSyntax
-    fi
+    setPathToConfigRollback
 fi
 
 
