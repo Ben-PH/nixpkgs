@@ -62,6 +62,239 @@ installBootloader=
 json=
 
 ## General helpers
+buildHostCmd() {
+    local c
+    if [[ "${useSudo:-x}" = 1 ]]; then
+        c=("sudo")
+    else
+        c=()
+    fi
+
+    if [ -z "$buildHost" ]; then
+        runCmd "$@"
+    elif [ -n "$remoteNix" ]; then
+        runCmd ssh $SSHOPTS "$buildHost" "${c[@]}" env PATH="$remoteNix":'$PATH' "$@"
+    else
+        runCmd ssh $SSHOPTS "$buildHost" "${c[@]}" "$@"
+    fi
+}
+
+targetHostCmd() {
+    local c
+    if [[ "${useSudo:-x}" = 1 ]]; then
+        c=("sudo")
+    else
+        c=()
+    fi
+
+    if [ -z "$targetHost" ]; then
+        runCmd "${c[@]}" "$@"
+    else
+        runCmd ssh $SSHOPTS "$targetHost" "${c[@]}" "$@"
+    fi
+}
+
+targetHostSudoCmd() {
+    local t=
+    if [[ ! "${noSSHTTY:-x}" = 1 ]]; then
+        t="-t"
+    fi
+
+    if [ -n "$remoteSudo" ]; then
+        useSudo=1 SSHOPTS="$SSHOPTS $t" targetHostCmd "$@"
+    else
+        # While a tty might not be necessary, we apply it to be consistent with
+        # sudo usage, and an experience that is more consistent with local deployment.
+        # But if the user really doesn't want it, don't do it.
+        SSHOPTS="$SSHOPTS $t" targetHostCmd "$@"
+    fi
+}
+
+copyToTarget() {
+    if ! [ "$targetHost" = "$buildHost" ]; then
+        if [ -z "$targetHost" ]; then
+            logVerbose "Running nix-copy-closure with these NIX_SSHOPTS: $SSHOPTS"
+            NIX_SSHOPTS=$SSHOPTS runCmd nix-copy-closure "${copyFlags[@]}" --from "$buildHost" "$1"
+        elif [ -z "$buildHost" ]; then
+            logVerbose "Running nix-copy-closure with these NIX_SSHOPTS: $SSHOPTS"
+            NIX_SSHOPTS=$SSHOPTS runCmd nix-copy-closure "${copyFlags[@]}" --to "$targetHost" "$1"
+        else
+            buildHostCmd nix-copy-closure "${copyFlags[@]}" --to "$targetHost" "$1"
+        fi
+    fi
+}
+
+nixBuild() {
+    logVerbose "Building in legacy (non-flake) mode."
+    if [ -z "$buildHost" ]; then
+        logVerbose "No --build-host given, running nix-build locally"
+        runCmd nix-build "$@"
+    else
+        logVerbose "buildHost set to \"$buildHost\", running nix-build remotely"
+        local instArgs=()
+        local buildArgs=()
+        local drv=
+
+        while [ "$#" -gt 0 ]; do
+            local i="$1"; shift 1
+            case "$i" in
+              -o)
+                local out="$1"; shift 1
+                buildArgs+=("--add-root" "$out" "--indirect")
+                ;;
+              -A)
+                local j="$1"; shift 1
+                instArgs+=("$i" "$j")
+                ;;
+              -I) # We don't want this in buildArgs
+                shift 1
+                ;;
+              --no-out-link) # We don't want this in buildArgs
+                ;;
+              "<"*) # nix paths
+                instArgs+=("$i")
+                ;;
+              *)
+                buildArgs+=("$i")
+                ;;
+            esac
+        done
+
+        drv="$(runCmd nix-instantiate "${instArgs[@]}" "${extraBuildFlags[@]}")"
+        if [ -a "$drv" ]; then
+            logVerbose "Running nix-copy-closure with these NIX_SSHOPTS: $SSHOPTS"
+            NIX_SSHOPTS=$SSHOPTS runCmd nix-copy-closure --to "$buildHost" "$drv"
+            buildHostCmd nix-store -r "$drv" "${buildArgs[@]}"
+        else
+            log "nix-instantiate failed"
+            exit 1
+        fi
+  fi
+}
+
+nixFlakeBuild() {
+    logVerbose "Building in flake mode."
+    if [[ -z "$buildHost" && -z "$targetHost" && "$action" != switch && "$action" != boot && "$action" != test && "$action" != dry-activate ]]
+    then
+        runCmd nix "${flakeFlags[@]}" build "$@"
+        readlink -f ./result
+    elif [ -z "$buildHost" ]; then
+        runCmd nix "${flakeFlags[@]}" build "$@" --out-link "${tmpDir}/result"
+        readlink -f "${tmpDir}/result"
+    else
+        local attr="$1"
+        shift 1
+        local evalArgs=()
+        local buildArgs=()
+        local drv=
+
+        while [ "$#" -gt 0 ]; do
+            local i="$1"; shift 1
+            case "$i" in
+              --recreate-lock-file|--no-update-lock-file|--no-write-lock-file|--no-registries|--commit-lock-file)
+                evalArgs+=("$i")
+                ;;
+              --update-input)
+                local j="$1"; shift 1
+                evalArgs+=("$i" "$j")
+                ;;
+              --override-input)
+                local j="$1"; shift 1
+                local k="$1"; shift 1
+                evalArgs+=("$i" "$j" "$k")
+                ;;
+              --impure) # We don't want this in buildArgs, it's only needed at evaluation time, and unsupported during realisation
+                ;;
+              *)
+                buildArgs+=("$i")
+                ;;
+            esac
+        done
+
+        drv="$(runCmd nix "${flakeFlags[@]}" eval --raw "${attr}.drvPath" "${evalArgs[@]}" "${extraBuildFlags[@]}")"
+        if [ -a "$drv" ]; then
+            logVerbose "Running nix with these NIX_SSHOPTS: $SSHOPTS"
+            NIX_SSHOPTS=$SSHOPTS runCmd nix "${flakeFlags[@]}" copy "${copyFlags[@]}" --derivation --to "ssh://$buildHost" "$drv"
+            buildHostCmd nix-store -r "$drv" "${buildArgs[@]}"
+        else
+            log "nix eval failed"
+            exit 1
+        fi
+    fi
+}
+
+nixSystem() {
+    machine="$(uname -m)"
+    if [[ "$machine" =~ i.86 ]]; then
+        machine=i686
+    fi
+    echo $machine-linux
+}
+
+prebuiltNix() {
+    machine="$1"
+    if [ "$machine" = x86_64 ]; then
+        echo @nix_x86_64_linux@
+    elif [[ "$machine" =~ i.86 ]]; then
+        echo @nix_i686_linux@
+    elif [[ "$machine" = aarch64 ]]; then
+        echo @nix_aarch64_linux@
+    else
+        log "$0: unsupported platform"
+        exit 1
+    fi
+}
+
+getNixDrv() {
+    nixDrv=
+
+    if [[ -z $buildingAttribute ]]; then
+        if nixDrv="$(runCmd nix-instantiate $buildFile --add-root "$tmpDir/nix.drv" --indirect -A ${attr:+$attr.}config.nix.package.out "${extraBuildFlags[@]}")"; then return; fi
+    fi
+    if nixDrv="$(runCmd nix-instantiate '<nixpkgs/nixos>' --add-root "$tmpDir/nix.drv" --indirect -A config.nix.package.out "${extraBuildFlags[@]}")"; then return; fi
+    if nixDrv="$(runCmd nix-instantiate '<nixpkgs>' --add-root "$tmpDir/nix.drv" --indirect -A nix "${extraBuildFlags[@]}")"; then return; fi
+
+    if ! nixStorePath="$(runCmd nix-instantiate --eval '<nixpkgs/nixos/modules/installer/tools/nix-fallback-paths.nix>' -A "$(nixSystem)" | sed -e 's/^"//' -e 's/"$//')"; then
+        nixStorePath="$(prebuiltNix "$(uname -m)")"
+    fi
+    if ! runCmd nix-store -r "$nixStorePath" --add-root "${tmpDir}/nix" --indirect \
+        --option extra-binary-caches https://cache.nixos.org/; then
+        log "warning: don't know how to get latest Nix"
+    fi
+    # Older version of nix-store -r don't support --add-root.
+    [ -e "$tmpDir/nix" ] || ln -sf "$nixStorePath" "$tmpDir/nix"
+    if [ -n "$buildHost" ]; then
+        remoteNixStorePath="$(runCmd prebuiltNix "$(buildHostCmd uname -m)")"
+        remoteNix="$remoteNixStorePath/bin"
+        if ! buildHostCmd nix-store -r "$remoteNixStorePath" \
+          --option extra-binary-caches https://cache.nixos.org/ >/dev/null; then
+            remoteNix=
+            log "warning: don't know how to get latest Nix"
+        fi
+    fi
+}
+
+getVersion() {
+    local dir="$1"
+    local rev=
+    local gitDir="$dir/.git"
+    if [ -e "$gitDir" ]; then
+        if [ -z "$(type -P git)" ]; then
+            echo "warning: Git not found; cannot figure out revision of $dir" >&2
+            return
+        fi
+        cd "$dir"
+        rev=$(git --git-dir="$gitDir" rev-parse --short HEAD)
+        if git --git-dir="$gitDir" describe --always --dirty | grep -q dirty; then
+            rev+=M
+        fi
+    fi
+
+    if [ -n "$rev" ]; then
+        echo ".git.$rev"
+    fi
+}
+
 upgradeChannels() {
     for channelpath in /nix/var/nix/profiles/per-user/root/channels/*; do
         channel_name=$(basename "$channelpath")
@@ -579,166 +812,6 @@ if [ -z "$action" ]; then
     logVerbose "error: Must supply command"
 fi
 
-buildHostCmd() {
-    local c
-    if [[ "${useSudo:-x}" = 1 ]]; then
-        c=("sudo")
-    else
-        c=()
-    fi
-
-    if [ -z "$buildHost" ]; then
-        runCmd "$@"
-    elif [ -n "$remoteNix" ]; then
-        runCmd ssh $SSHOPTS "$buildHost" "${c[@]}" env PATH="$remoteNix":'$PATH' "$@"
-    else
-        runCmd ssh $SSHOPTS "$buildHost" "${c[@]}" "$@"
-    fi
-}
-
-targetHostCmd() {
-    local c
-    if [[ "${useSudo:-x}" = 1 ]]; then
-        c=("sudo")
-    else
-        c=()
-    fi
-
-    if [ -z "$targetHost" ]; then
-        runCmd "${c[@]}" "$@"
-    else
-        runCmd ssh $SSHOPTS "$targetHost" "${c[@]}" "$@"
-    fi
-}
-
-targetHostSudoCmd() {
-    local t=
-    if [[ ! "${noSSHTTY:-x}" = 1 ]]; then
-        t="-t"
-    fi
-
-    if [ -n "$remoteSudo" ]; then
-        useSudo=1 SSHOPTS="$SSHOPTS $t" targetHostCmd "$@"
-    else
-        # While a tty might not be necessary, we apply it to be consistent with
-        # sudo usage, and an experience that is more consistent with local deployment.
-        # But if the user really doesn't want it, don't do it.
-        SSHOPTS="$SSHOPTS $t" targetHostCmd "$@"
-    fi
-}
-
-copyToTarget() {
-    if ! [ "$targetHost" = "$buildHost" ]; then
-        if [ -z "$targetHost" ]; then
-            logVerbose "Running nix-copy-closure with these NIX_SSHOPTS: $SSHOPTS"
-            NIX_SSHOPTS=$SSHOPTS runCmd nix-copy-closure "${copyFlags[@]}" --from "$buildHost" "$1"
-        elif [ -z "$buildHost" ]; then
-            logVerbose "Running nix-copy-closure with these NIX_SSHOPTS: $SSHOPTS"
-            NIX_SSHOPTS=$SSHOPTS runCmd nix-copy-closure "${copyFlags[@]}" --to "$targetHost" "$1"
-        else
-            buildHostCmd nix-copy-closure "${copyFlags[@]}" --to "$targetHost" "$1"
-        fi
-    fi
-}
-
-nixBuild() {
-    logVerbose "Building in legacy (non-flake) mode."
-    if [ -z "$buildHost" ]; then
-        logVerbose "No --build-host given, running nix-build locally"
-        runCmd nix-build "$@"
-    else
-        logVerbose "buildHost set to \"$buildHost\", running nix-build remotely"
-        local instArgs=()
-        local buildArgs=()
-        local drv=
-
-        while [ "$#" -gt 0 ]; do
-            local i="$1"; shift 1
-            case "$i" in
-              -o)
-                local out="$1"; shift 1
-                buildArgs+=("--add-root" "$out" "--indirect")
-                ;;
-              -A)
-                local j="$1"; shift 1
-                instArgs+=("$i" "$j")
-                ;;
-              -I) # We don't want this in buildArgs
-                shift 1
-                ;;
-              --no-out-link) # We don't want this in buildArgs
-                ;;
-              "<"*) # nix paths
-                instArgs+=("$i")
-                ;;
-              *)
-                buildArgs+=("$i")
-                ;;
-            esac
-        done
-
-        drv="$(runCmd nix-instantiate "${instArgs[@]}" "${extraBuildFlags[@]}")"
-        if [ -a "$drv" ]; then
-            logVerbose "Running nix-copy-closure with these NIX_SSHOPTS: $SSHOPTS"
-            NIX_SSHOPTS=$SSHOPTS runCmd nix-copy-closure --to "$buildHost" "$drv"
-            buildHostCmd nix-store -r "$drv" "${buildArgs[@]}"
-        else
-            log "nix-instantiate failed"
-            exit 1
-        fi
-  fi
-}
-
-nixFlakeBuild() {
-    logVerbose "Building in flake mode."
-    if [[ -z "$buildHost" && -z "$targetHost" && "$action" != switch && "$action" != boot && "$action" != test && "$action" != dry-activate ]]
-    then
-        runCmd nix "${flakeFlags[@]}" build "$@"
-        readlink -f ./result
-    elif [ -z "$buildHost" ]; then
-        runCmd nix "${flakeFlags[@]}" build "$@" --out-link "${tmpDir}/result"
-        readlink -f "${tmpDir}/result"
-    else
-        local attr="$1"
-        shift 1
-        local evalArgs=()
-        local buildArgs=()
-        local drv=
-
-        while [ "$#" -gt 0 ]; do
-            local i="$1"; shift 1
-            case "$i" in
-              --recreate-lock-file|--no-update-lock-file|--no-write-lock-file|--no-registries|--commit-lock-file)
-                evalArgs+=("$i")
-                ;;
-              --update-input)
-                local j="$1"; shift 1
-                evalArgs+=("$i" "$j")
-                ;;
-              --override-input)
-                local j="$1"; shift 1
-                local k="$1"; shift 1
-                evalArgs+=("$i" "$j" "$k")
-                ;;
-              --impure) # We don't want this in buildArgs, it's only needed at evaluation time, and unsupported during realisation
-                ;;
-              *)
-                buildArgs+=("$i")
-                ;;
-            esac
-        done
-
-        drv="$(runCmd nix "${flakeFlags[@]}" eval --raw "${attr}.drvPath" "${evalArgs[@]}" "${extraBuildFlags[@]}")"
-        if [ -a "$drv" ]; then
-            logVerbose "Running nix with these NIX_SSHOPTS: $SSHOPTS"
-            NIX_SSHOPTS=$SSHOPTS runCmd nix "${flakeFlags[@]}" copy "${copyFlags[@]}" --derivation --to "ssh://$buildHost" "$drv"
-            buildHostCmd nix-store -r "$drv" "${buildArgs[@]}"
-        else
-            log "nix eval failed"
-            exit 1
-        fi
-    fi
-}
 
 
 
@@ -804,78 +877,6 @@ if [ "$action" = edit ]; then openEditor; fi
 
 SSHOPTS="$NIX_SSHOPTS -o ControlMaster=auto -o ControlPath=$tmpDir/ssh-%n -o ControlPersist=60"
 
-
-nixSystem() {
-    machine="$(uname -m)"
-    if [[ "$machine" =~ i.86 ]]; then
-        machine=i686
-    fi
-    echo $machine-linux
-}
-
-prebuiltNix() {
-    machine="$1"
-    if [ "$machine" = x86_64 ]; then
-        echo @nix_x86_64_linux@
-    elif [[ "$machine" =~ i.86 ]]; then
-        echo @nix_i686_linux@
-    elif [[ "$machine" = aarch64 ]]; then
-        echo @nix_aarch64_linux@
-    else
-        log "$0: unsupported platform"
-        exit 1
-    fi
-}
-
-getNixDrv() {
-    nixDrv=
-
-    if [[ -z $buildingAttribute ]]; then
-        if nixDrv="$(runCmd nix-instantiate $buildFile --add-root "$tmpDir/nix.drv" --indirect -A ${attr:+$attr.}config.nix.package.out "${extraBuildFlags[@]}")"; then return; fi
-    fi
-    if nixDrv="$(runCmd nix-instantiate '<nixpkgs/nixos>' --add-root "$tmpDir/nix.drv" --indirect -A config.nix.package.out "${extraBuildFlags[@]}")"; then return; fi
-    if nixDrv="$(runCmd nix-instantiate '<nixpkgs>' --add-root "$tmpDir/nix.drv" --indirect -A nix "${extraBuildFlags[@]}")"; then return; fi
-
-    if ! nixStorePath="$(runCmd nix-instantiate --eval '<nixpkgs/nixos/modules/installer/tools/nix-fallback-paths.nix>' -A "$(nixSystem)" | sed -e 's/^"//' -e 's/"$//')"; then
-        nixStorePath="$(prebuiltNix "$(uname -m)")"
-    fi
-    if ! runCmd nix-store -r "$nixStorePath" --add-root "${tmpDir}/nix" --indirect \
-        --option extra-binary-caches https://cache.nixos.org/; then
-        log "warning: don't know how to get latest Nix"
-    fi
-    # Older version of nix-store -r don't support --add-root.
-    [ -e "$tmpDir/nix" ] || ln -sf "$nixStorePath" "$tmpDir/nix"
-    if [ -n "$buildHost" ]; then
-        remoteNixStorePath="$(runCmd prebuiltNix "$(buildHostCmd uname -m)")"
-        remoteNix="$remoteNixStorePath/bin"
-        if ! buildHostCmd nix-store -r "$remoteNixStorePath" \
-          --option extra-binary-caches https://cache.nixos.org/ >/dev/null; then
-            remoteNix=
-            log "warning: don't know how to get latest Nix"
-        fi
-    fi
-}
-
-getVersion() {
-    local dir="$1"
-    local rev=
-    local gitDir="$dir/.git"
-    if [ -e "$gitDir" ]; then
-        if [ -z "$(type -P git)" ]; then
-            echo "warning: Git not found; cannot figure out revision of $dir" >&2
-            return
-        fi
-        cd "$dir"
-        rev=$(git --git-dir="$gitDir" rev-parse --short HEAD)
-        if git --git-dir="$gitDir" describe --always --dirty | grep -q dirty; then
-            rev+=M
-        fi
-    fi
-
-    if [ -n "$rev" ]; then
-        echo ".git.$rev"
-    fi
-}
 
 
 if [[ -n $buildNix && -z $flake ]]; then
