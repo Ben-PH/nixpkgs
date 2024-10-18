@@ -109,6 +109,19 @@ flakeSetup() {
     fi
 }
 
+openEditor() {
+    if [[ -z $flake ]]; then
+        NIXOS_CONFIG=${NIXOS_CONFIG:-$(runCmd nix-instantiate --find-file nixos-config)}
+        if [[ -d $NIXOS_CONFIG ]]; then
+            NIXOS_CONFIG=$NIXOS_CONFIG/default.nix
+        fi
+        runCmd exec ${EDITOR:-nano} "$NIXOS_CONFIG"
+    else
+        runCmd exec nix "${flakeFlags[@]}" edit "${lockFlags[@]}" -- "$flake#$flakeAttr"
+    fi
+    exit 1
+}
+
 while [ "$#" -gt 0 ]; do
     i="$1"; shift 1
     case "$i" in
@@ -513,19 +526,8 @@ if [[ -z $_NIXOS_REBUILD_REEXEC && -n $canRun && -z $fast ]]; then
     fi
 fi
 
-# Find configuration.nix and open editor instead of building.
-if [ "$action" = edit ]; then
-    if [[ -z $flake ]]; then
-        NIXOS_CONFIG=${NIXOS_CONFIG:-$(runCmd nix-instantiate --find-file nixos-config)}
-        if [[ -d $NIXOS_CONFIG ]]; then
-            NIXOS_CONFIG=$NIXOS_CONFIG/default.nix
-        fi
-        runCmd exec ${EDITOR:-nano} "$NIXOS_CONFIG"
-    else
-        runCmd exec nix "${flakeFlags[@]}" edit "${lockFlags[@]}" -- "$flake#$flakeAttr"
-    fi
-    exit 1
-fi
+# Open editor instead of building.
+if [ "$action" = edit ]; then openEditor; fi
 
 SSHOPTS="$NIX_SSHOPTS -o ControlMaster=auto -o ControlPath=$tmpDir/ssh-%n -o ControlPersist=60"
 
